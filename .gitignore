@@ -1,7 +1,8 @@
 scripts/__pycache__
 models/classical_machine_learning/*.bin
 models/classical_machine_learning/*predict*
-data/raw/*
+data/raw/recipe_interaction/*
 data/processed/recipes.pkl
 data/processed/recipes_unscaled.pkl
 data/outputs/*ffm*
+xlearn_log*

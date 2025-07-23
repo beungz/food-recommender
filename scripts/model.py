@@ -5,7 +5,6 @@ import pandas as pd
 
 import shutil 
 import gc
-import itertools
 
 import torch
 from torch.optim import Adam
@@ -18,10 +17,11 @@ from pytorch_widedeep.training import Trainer
 import xlearn as xl
 
 from recommenders.utils.timer import Timer
-from recommenders.evaluation.python_evaluation import precision_at_k, recall_at_k, map_at_k, ndcg_at_k
+from recommenders.evaluation.python_evaluation import recall_at_k, map_at_k, ndcg_at_k
 from recommenders.tuning.parameter_sweep import generate_param_grid
 
 from sklearn.metrics import roc_auc_score
+from sklearn.metrics.pairwise import cosine_similarity
 
 from scripts.build_features import expand_ffm_features
 from scripts.make_dataset import write_ffm_file_from_expanded_df
@@ -35,7 +35,7 @@ processed_data_path = os.path.join("data", "processed")
 
 def ffm_train_model(test_merged):
     """
-    Trains an FFM model and evaluates recall at various k values.
+    Trains an FFM model and evaluates metrics at various k values.
     """
 
     # Set file paths for FFM training, validation, and test datasets
@@ -96,16 +96,6 @@ def ffm_train_model(test_merged):
 def ffm_train_model_hyperparam_tuning(test_merged, param_dict):
     """
     Performs hyperparameter tuning for the FFM model using the provided parameter grid.
-    
-    Parameters:
-        test_merged : The merged test dataset containing features and labels.
-        param_dict : Dictionary of hyperparameters to sweep over for tuning.
-    
-    Returns:
-        best_ffm_model: The best trained FFM model based on Recall@200.
-        best_test_predictions : Predictions from the best model.
-        best_recall_k_x : Best Recall@x score.
-        tuned_results (pd.DataFrame): DataFrame containing results for all hyperparameter combinations.
     """
 
     # Set file paths for FFM training, validation, and test datasets
@@ -177,6 +167,7 @@ def ffm_train_model_hyperparam_tuning(test_merged, param_dict):
                 best_ffm_model = ffm_model
                 best_test_predictions = test_predictions
                 best_eval_result = eval_results
+                best_map_k_10 = map_k_10
   
                 print(f"New best model found with MAP@10: {best_map_k_10:.6f}")
                 shutil.copy(ffm_modelout_path, best_ffm_modelout_path)
@@ -216,7 +207,6 @@ def ffm_train_model_hyperparam_tuning(test_merged, param_dict):
             print(f"\nClearing memory after {count} iterations...")
             test_merged = None
             test_merged = pd.read_pickle(test_merged_path)
-            print("Reloaded test_merged from disk to free memory.")
             print("Reloaded test_merged from disk to free memory.")
 
     # Save tuning results
@@ -433,17 +423,20 @@ def get_top_k_recommendations_existing_user(
 
 
 
-def naive_evaluation(interactions, test_merged):
-    """
-    Naive prediction for users, by predicting the most popular recipes, based on number of interactions, and evaluate recall@k
-    """
+def naive_evaluation(interactions, test_merged, top_n=10):
+    '''
+    Naive prediction for users, by predicting the most popular recipes, based on number of interactions, and evaluate MAP, NDCG, Recall, AUC
+    '''
 
     # Compute item popularity (frequency of interaction)
     item_counts = interactions["item_id_enc"].value_counts()
     
+    # Keep only top_n most popular items
+    top_n_items = item_counts.head(top_n)
+
     # Normalize popularity scores to [0, 1]
-    max_count = item_counts.max()
-    item_scores = (item_counts / max_count).to_dict()
+    max_count = top_n_items.max()
+    item_scores = (top_n_items / max_count).to_dict()
 
     # Create prediction scores for test_merged
     pred_df = test_merged.copy()
@@ -459,9 +452,9 @@ def naive_evaluation(interactions, test_merged):
 
 
 def wd_predict(wd_model, tab_preprocessor, wide_preprocessor, test_merged):
-    """
+    '''
     Get prediction using WD model
-    """
+    '''
 
     # Expand feature vectors into separated columns
     test_ffm_df = expand_ffm_features(test_merged)
@@ -490,9 +483,9 @@ def wd_predict(wd_model, tab_preprocessor, wide_preprocessor, test_merged):
 
 
 def ffm_predict(ffm_model, test_merged):
-    """
+    '''
     Get prediction using FFM model
-    """
+    '''
 
     # Path to model and output
     ffm_modelout_path = os.path.join(ffm_model_path, "model.out")
@@ -516,51 +509,226 @@ def ffm_predict(ffm_model, test_merged):
 
 
 
-# TO BE REVISED
-def get_top_k_recommendations_new_user(user_id_enc, interactions, test_merged, test_predictions, recipes_unscaled, user_enc, item_enc, k=200):
-    """
-    Return top-K recommended recipes for a new user.
-    """
-    user_id = user_enc.inverse_transform([user_id_enc])[0]
+def get_top_k_for_new_user(
+    recipes,
+    liked_ingredients=None,
+    disliked_ingredients=None,
+    keywords=None,
+    max_cooking_time=None,
+    cook_or_buy="buy",
+    nutrition_goals=None,
+    top_n=100,
+    popularity_col="popularity_score",
+    scaler=None,
+    interactions=None,
+    item_enc=None
+):
+    '''
+    For a new user, generate top-k recommendations using rule based scoring from cooking times, list of ingredients, keywords, and nutrition goals.
+    '''
+    df = recipes.copy()
 
-    seen_items = interactions[interactions["user_id_enc"] == user_id_enc]["item_id_enc"].unique()
+    # Unscale minutes and compare it with max_cooking_time to filter list of recipes
+    if scaler:
+        try:
+            df_unscaled = df[["minutes", "kcal", "fat", "sugar", "sodium", "protein", "carb"]].copy()
+            df_unscaled[["minutes", "kcal", "fat", "sugar", "sodium", "protein", "carb"]] = scaler.inverse_transform(
+                df_unscaled[["minutes", "kcal", "fat", "sugar", "sodium", "protein", "carb"]]
+            )
+            df["minutes_unscaled"] = df_unscaled["minutes"]
+        except:
+            df["minutes_unscaled"] = df["minutes"]  # fallback if not scaled
+    else:
+        df["minutes_unscaled"] = df["minutes"]
 
-    # Add scores to test set
-    test_merged_df = test_merged.copy()
-    test_merged_df["score"] = test_predictions
+    # Filter by cooking time
+    if max_cooking_time is not None:
+        df = df[df["minutes_unscaled"] <= max_cooking_time]
 
-    # Get user-specific candidates
-    user_candidates = test_merged_df[test_merged_df["user_id_enc"] == user_id_enc]
-    user_candidates = user_candidates[~user_candidates["item_id_enc"].isin(seen_items)]
+    # Ingredient Matching
+    def ingredient_match_score(ingredients, liked, disliked):
+        score = 0
+        if liked:
+            score += sum(1 for ing in liked if ing.lower() in [i.lower() for i in ingredients])
+        if disliked:
+            score -= sum(1 for ing in disliked if ing.lower() in [i.lower() for i in ingredients])
+        return score
 
-    # If not enough candidates, sample from other scored items (same user)
-    if len(user_candidates) < k:
-        needed = k - len(user_candidates)
-        print(f"Warning: only {len(user_candidates)} user-specific candidates available, padding with top from other users")
-        extra_candidates = test_merged_df[
-            ~test_merged_df["item_id_enc"].isin(seen_items)
-        ].sort_values("score", ascending=False).drop_duplicates("item_id_enc").head(needed)
+    if liked_ingredients or disliked_ingredients:
+        df["liked_score"] = df["ingredients"].apply(
+            lambda x: ingredient_match_score(x, liked_ingredients, disliked_ingredients)
+        )
+    else:
+        df["liked_score"] = 0
 
-        # Ensure same user_id_enc for consistency
-        extra_candidates["user_id_enc"] = user_id_enc
-        user_candidates = pd.concat([user_candidates, extra_candidates], ignore_index=True)
+    # Keyword Matching (search_terms + tags)
+    if keywords:
+        keywords = [k.lower() for k in keywords]
 
-    # Get top-k
-    top_k = user_candidates.sort_values("score", ascending=False).drop_duplicates("item_id_enc").head(k).copy()
-    top_k["recipe_id"] = item_enc.inverse_transform(top_k["item_id_enc"])
-    top_k["user_id"] = user_id
+        def keyword_score_fn(row):
+            terms = row.get("search_terms", []) + row.get("tags", [])
+            terms_joined = " ".join(terms).lower() if isinstance(terms, list) else str(terms).lower()
+            return sum(k in terms_joined for k in keywords)
 
-    top_k = top_k.drop(columns = ['minutes', 'kcal', 'fat', 'sugar', 'sodium', 'protein', 'carb'])
+        df["keyword_score"] = df.apply(keyword_score_fn, axis=1)
+    else:
+        df["keyword_score"] = 0
 
-    # Merge with recipe metadata
-    top_k = top_k.merge(
-        recipes_unscaled[['id', 'minutes', 'kcal', 'fat', 'sugar', 'sodium', 'protein', 'carb', 'name','cluster_vector']],
-        how="left",
-        left_on="recipe_id",
-        right_on="id"
-    ).drop(columns=["id"])
+    # Nutrition Goals Matching
+    nutrition_columns = ["minutes", "kcal", "fat", "sugar", "sodium", "protein", "carb"]
 
-    return top_k[[
-        "user_id", "user_id_enc", "recipe_id", "item_id_enc", "name", "score", "label",
-        "minutes", "kcal", "fat", "sugar", "sodium", "protein", "carb", "cluster", "techniques", "final_tag_embeddings", "ingredient_embeddings", "cluster_vector"
-    ]].reset_index(drop=True)
+    if nutrition_goals and scaler:
+        # Create goal vector with all 7 features (include minutes)
+        user_goal_array = np.array([nutrition_goals.get(col, 0) for col in nutrition_columns]).reshape(1, -1)
+        user_goal_scaled = scaler.transform(user_goal_array)[0]
+
+        def nutrition_distance(row):
+            recipe_vec = np.array([row.get(col, 0) for col in nutrition_columns])
+            return np.linalg.norm(recipe_vec - user_goal_scaled)
+
+        df["nutrition_distance"] = df.apply(nutrition_distance, axis=1)
+        max_dist = df["nutrition_distance"].max()
+        df["nutrition_score"] = 1 - df["nutrition_distance"] / max_dist if max_dist > 0 else 0
+    else:
+        df["nutrition_score"] = 0
+
+    # Compute Popularity Score
+    if popularity_col not in df.columns:
+        if interactions is not None and item_enc is not None:
+            df["item_id_enc"] = item_enc.transform(df["id"])
+            pop_df = compute_popularity_score(interactions)
+            df = df.merge(pop_df, on="item_id_enc", how="left")
+            df["popularity_score"] = df["popularity_score"].fillna(df["popularity_score"].mean())
+        else:
+            df["popularity_score"] = 0
+
+    # Final Weighted Score
+    weights = {
+        "liked_score": 0.4,
+        "keyword_score": 0.2,
+        "nutrition_score": 0.2,
+        "popularity_score": 0.2
+    }
+
+    df["final_score"] = sum(df[col] * w for col, w in weights.items())
+    df = df.sort_values("final_score", ascending=False).head(top_n)
+
+    # Unscale nutrition columns for display
+    if scaler:
+        scaled_cols = ["minutes", "kcal", "fat", "sugar", "sodium", "protein", "carb"]
+        df[scaled_cols] = scaler.inverse_transform(df[scaled_cols])
+
+    return df.reset_index(drop=True)
+
+
+
+def compute_popularity_score(interactions):
+    '''
+    Compute Bayesian popularity score from interactions dataframe.
+    '''
+    recipe_stats = interactions.groupby("item_id_enc").agg(
+        rating_mean=("rating", "mean"),
+        rating_count=("rating", "count")
+    ).reset_index()
+
+    C = recipe_stats["rating_mean"].mean()
+    m = recipe_stats["rating_count"].quantile(0.60)
+
+    recipe_stats["popularity_score"] = (
+        (recipe_stats["rating_count"] / (recipe_stats["rating_count"] + m)) * recipe_stats["rating_mean"] +
+        (m / (recipe_stats["rating_count"] + m)) * C
+    )
+
+    return recipe_stats[["item_id_enc", "popularity_score"]]
+
+
+
+def get_virtual_user_vector(recipes_df, recipe_ids):
+    '''
+    Create virtual vector for new user, which will be used to compare with vectors of existing users
+    '''
+    selected = recipes_df[recipes_df['id'].isin(recipe_ids)]
+    
+    return {
+        "ingredient_embedding": np.stack(selected["ingredient_embeddings"]).mean(axis=0),
+        "tag_embedding": np.stack(selected["final_tag_embeddings"]).mean(axis=0),
+        "nutrition": selected[["kcal", "protein", "carb", "fat"]].mean(axis=0).to_numpy()
+    }
+
+
+
+def get_existing_user_vectors(interactions_df, recipes_df, threshold=4.0):
+    '''
+    Get vectors of existing users, which will be used to find similar existing users (compared to the new user)
+    '''
+
+    # Filter interactions by ratings >= threshold
+    high_rated = interactions_df[interactions_df["rating"] >= threshold]
+    merged = high_rated.merge(recipes_df, left_on="item_id_enc", right_on="id")
+
+    # Get vectors of existing users
+    user_vectors = {}
+    for uid, group in merged.groupby("user_id_enc"):
+        user_vectors[uid] = {
+            "ingredient_embedding": np.stack(group["ingredient_embeddings"]).mean(axis=0),
+            "tag_embedding": np.stack(group["final_tag_embeddings"]).mean(axis=0),
+            "nutrition": group[["kcal", "protein", "carb", "fat"]].mean(axis=0).to_numpy()
+        }
+
+    return user_vectors
+
+
+
+def find_most_similar_user(virtual_user_vector, user_vectors):
+    '''
+    From the list of existing users, find the most similar user (compared to the new user), using cosine similarity
+    '''
+    
+    max_score = -1
+    best_user_id = None
+    for uid, vec in user_vectors.items():
+        ing_sim = cosine_similarity(
+            virtual_user_vector["ingredient_embedding"].reshape(1, -1),
+            vec["ingredient_embedding"].reshape(1, -1)
+        )[0, 0]
+        tag_sim = cosine_similarity(
+            virtual_user_vector["tag_embedding"].reshape(1, -1),
+            vec["tag_embedding"].reshape(1, -1)
+        )[0, 0]
+        nutri_sim = cosine_similarity(
+            virtual_user_vector["nutrition"].reshape(1, -1),
+            vec["nutrition"].reshape(1, -1)
+        )[0, 0]
+        total_sim = (0.4 * ing_sim) + (0.4 * tag_sim) + (0.2 * nutri_sim)
+        if total_sim > max_score:
+            max_score = total_sim
+            best_user_id = uid
+    return best_user_id
+
+
+
+def combine_recommendations(rule_based, model_based, k=50):
+    '''
+    Alternating rule-based and model-based recommendations, while preserving uniqueness and limiting to k items.
+    '''
+    seen = set()
+    combined = []
+    
+    # Fill in the list from rule based and model based, in an alternating pattern
+    for r, m in zip(rule_based, model_based):
+        for item in (r, m):
+            if item not in seen:
+                combined.append(item)
+                seen.add(item)
+                if len(combined) == k:
+                    return combined
+
+    # If still not enough, fill from remaining items
+    for remaining in rule_based[len(combined)//2:] + model_based[len(combined)//2:]:
+        if remaining not in seen:
+            combined.append(remaining)
+            seen.add(remaining)
+            if len(combined) == k:
+                break
+
+    return combined

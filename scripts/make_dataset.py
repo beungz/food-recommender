@@ -23,6 +23,8 @@ recipes_techniques_path = os.path.join("data", "raw", "recipe_interaction", "PP_
 processed_data_path = os.path.join("data", "processed")
 outputs_data_path = os.path.join("data", "outputs")
 
+wd_model_path = os.path.join("models", "deep_learning")
+
 
 
 def prepare_data():
@@ -84,7 +86,7 @@ def prepare_data():
     recipes, all_fallback_tags = get_fallback_tags(recipes, food2vec_model_vectors, frequent_ingredients)
 
     # Process on all tags-like features, and create a combination of tags (tags, search_terms, fallback tags)
-    recipes = process_all_tags(recipes)
+    recipes, all_final_tags, all_tags_search_terms = process_all_tags(recipes)
 
     # Scale numeric features
     num_cols = ["minutes", "kcal", "fat", "sugar", "sodium", "protein", "carb"]
@@ -162,7 +164,18 @@ def get_ingredient_stat(recipes):
     frequent_ingredients = {ing for ing, count in ingredient_counter.items() if count >= threshold}
     print(f"Total Unique ingredients: {num_unique_ingredients}, Frequent ingredients (>= {threshold} occurrences): {len(frequent_ingredients)}")
 
-    return all_ingredients, frequent_ingredients
+    # Make all_ingredients unique
+    all_ingredients_unique = sorted(list(set(all_ingredients)))
+    frequent_ingredients_unique = sorted(list(set(frequent_ingredients)))
+
+    # Save all_ingredients
+    all_ingredients_path = os.path.join(processed_data_path, "all_ingredients.pkl")
+    joblib.dump(all_ingredients_unique, all_ingredients_path)
+
+    frequent_ingredients_path = os.path.join(processed_data_path, "frequent_ingredients.pkl")
+    joblib.dump(frequent_ingredients_unique, frequent_ingredients_path)
+
+    return all_ingredients_unique, frequent_ingredients_unique
 
 
 
@@ -432,6 +445,12 @@ def prepare_wd_data(train_ffm_df, valid_ffm_df, test_ffm_df):
     X_wide_test = wide_preprocessor.transform(test_ffm_df)
     y_test = test_ffm_df["label"].values
 
+    # Save the preprocessors
+    tab_preprocessor_path = os.path.join(wd_model_path, "tab_preprocessor.pkl")
+    wide_preprocessor_path = os.path.join(wd_model_path, "wide_preprocessor.pkl")
+    joblib.dump(tab_preprocessor, tab_preprocessor_path)
+    joblib.dump(wide_preprocessor, wide_preprocessor_path)
+    
     print("\nWD data preparation done")
 
     return tab_preprocessor, wide_preprocessor, X_tab_train, X_wide_train, y_train, X_tab_valid, X_wide_valid, y_valid, X_tab_test, X_wide_test, y_test
