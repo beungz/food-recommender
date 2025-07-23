@@ -127,18 +127,19 @@ This project is intended for research and educational purposes in recommender sy
 
 ### **Requirements**:<br>
 ```
-scikit-learn==1.7.0
-gensim==4.3.3
-torch==2.6.0
-xlearn==0.40a1
-cmake-4.0.3
-recommenders==1.2.1
-pytorch_widedeep==1.6.5
-joblib==1.5.1
-tqdm_joblib==0.0.4
-tqdm==4.67.1
 numpy==1.26.4
-pandas==2.3.0
+pandas==2.2.2
+scikit-learn==1.3.2
+joblib==1.3.2
+tqdm==4.67.1
+tqdm_joblib==0.0.4
+streamlit==1.35.0
+gensim==4.3.3
+torch==2.1.2
+pytorch_widedeep==1.6.5
+xlearn==0.40a1
+cmake==3.26.4
+recommenders==1.2.1
 ```
 
 For Windows users, xlearn has to be installed from source: <br>
