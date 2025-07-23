@@ -1,0 +1,20 @@
+# Ignore datasets
+**/data/raw/*
+**/data/processed/train*
+**/data/processed/valid*
+**/data/processed/test*
+**/data/processed/recipes_unscaled.pkl
+**/data/outputs/*ffm*
+
+# Ignore classical machine learning model (keep deep learning)
+**/models/classical_machine_learning/*
+
+# Ignore jupyter notebook
+**/*.ipynb
+
+# Ignore cache
+**/__pycache__/*
+
+# Ignore Git stuff
+.git/
+.gitignore

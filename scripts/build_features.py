@@ -13,6 +13,7 @@ from sklearn.cluster import KMeans
 
 from gensim.models import Word2Vec
 
+processed_data_path = os.path.join("data", "processed")
 outputs_data_path = os.path.join("data", "outputs")
 
 
@@ -184,7 +185,23 @@ def process_all_tags(recipes):
     num_unique_final_tags = len(final_tags_counter)
     print(f"Total unique final tags: {num_unique_final_tags}")
 
-    return recipes
+    # Make all_final_tags unique
+    all_final_tags_unique = sorted(list(set(all_final_tags)))
+
+    all_final_tags_path = os.path.join(processed_data_path, "all_final_tags.pkl")
+    joblib.dump(all_final_tags_unique, all_final_tags_path)
+
+    # Create list from search_terms + tags only (no fallback_tags)
+    all_tags_search_terms = [ing.strip().lower() 
+                             for row in recipes.itertuples(index=False)
+                             for ing in list(row.search_terms) + list(row.tags)]
+    
+    all_tags_search_terms_unique = sorted(list(set(all_tags_search_terms)))
+
+    all_tags_search_terms_path = os.path.join(processed_data_path, "all_tags_search_terms.pkl")
+    joblib.dump(all_tags_search_terms_unique, all_tags_search_terms_path)
+
+    return recipes, all_final_tags_unique, all_tags_search_terms_unique
 
 
 
